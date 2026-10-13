@@ -1,0 +1,17 @@
+[package]
+name = "comfypgp"
+version = "0.1.0"
+edition = "2024"
+description = "comfyPGP - OpenPGP key generator for Windows"
+
+[dependencies]
+anyhow = "1"
+arboard = "3.6"
+eframe = "0.36"
+rfd = "0.17"
+# CNG backend: uses Windows' native cryptography, no external DLLs.
+sequoia-openpgp = { version = "2.4", default-features = false, features = ["crypto-cng", "compression"] }
+
+[profile.release]
+lto = true
+strip = true
