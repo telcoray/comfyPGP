@@ -33,6 +33,22 @@ impl Expiry {
         }
     }
 
+    /// What the choice means in practice, with the actual date.
+    fn explanation(self) -> String {
+        match self {
+            Expiry::Never => "The key never expires by itself. Keep the revocation \
+                              certificate safe: it is your only way to retire the key."
+                .into(),
+            Expiry::Years(n) => {
+                let until = chrono::Local::now() + chrono::Duration::days(365 * n as i64);
+                format!(
+                    "Valid until {}. You can extend it at any time.",
+                    until.format("%-d %B %Y")
+                )
+            }
+        }
+    }
+
     fn duration(self) -> Option<Duration> {
         match self {
             Expiry::Never => None,
@@ -180,78 +196,15 @@ impl ComfyApp {
     fn form_ui(&mut self, ui: &mut egui::Ui) {
         let busy = self.pending.is_some();
         ui.add_enabled_ui(!busy, |ui| {
-            form_grid("identity").show(ui, |ui| {
-                ui.label("Name or nickname");
-                ui.add(egui::TextEdit::singleline(&mut self.name).hint_text("optional"));
-                ui.end_row();
-
-                ui.label("Email");
-                ui.add(egui::TextEdit::singleline(&mut self.email).hint_text("optional"));
-                ui.end_row();
-            });
-
-            ui.add_space(12.0);
+            self.identity_ui(ui);
+            ui.add_space(SECTION_GAP);
             self.key_type_ui(ui);
-            ui.add_space(12.0);
+            ui.add_space(SECTION_GAP);
+            self.expiry_ui(ui);
+            ui.add_space(SECTION_GAP);
+            self.passphrase_ui(ui);
+            ui.add_space(SECTION_GAP);
 
-            form_grid("options").show(ui, |ui| {
-                ui.label("Expires");
-                egui::ComboBox::from_id_salt("expiry")
-                    .selected_text(self.expiry.label())
-                    .show_ui(ui, |ui| {
-                        for e in Expiry::CHOICES {
-                            ui.selectable_value(&mut self.expiry, e, e.label());
-                        }
-                    });
-                ui.end_row();
-
-                ui.label("Passphrase");
-                ui.checkbox(&mut self.use_passphrase, "Protect the secret key");
-                ui.end_row();
-
-                if self.use_passphrase {
-                    ui.label("");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.passphrase)
-                            .password(true)
-                            .hint_text("passphrase"),
-                    );
-                    ui.end_row();
-
-                    ui.label("");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.passphrase_repeat)
-                            .password(true)
-                            .hint_text("repeat passphrase"),
-                    );
-                    ui.end_row();
-                }
-            });
-
-            ui.add_space(6.0);
-            if keygen::user_id(&self.name, &self.email).is_none() {
-                warning(
-                    ui,
-                    "With no name or email the key has no User ID: GnuPG/Kleopatra \
-                     may refuse to import it. A nickname is enough.",
-                );
-            }
-            if self.expiry == Expiry::Never {
-                warning(
-                    ui,
-                    "With no expiry, keep the revocation certificate safe: it is the only \
-                     way to invalidate the key if you lose it.",
-                );
-            }
-            if !self.use_passphrase {
-                warning(
-                    ui,
-                    "Without a passphrase, anyone who gets the secret key file can \
-                     use it as you.",
-                );
-            }
-
-            ui.add_space(10.0);
             let error = self.form_error();
             ui.horizontal(|ui| {
                 let button = egui::Button::new(RichText::new("🔑  Generate key").size(16.0));
@@ -268,13 +221,105 @@ impl ComfyApp {
         });
     }
 
-    /// Key type picker, written for people who have never used PGP:
-    /// plain names first, the technical name only as a footnote.
-    fn key_type_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("Key type").strong());
-        ui.label(RichText::new("Both are equally secure. Not sure? Keep Modern.").weak());
-        ui.add_space(4.0);
+    // Every section is written for people who have never used PGP:
+    // the controls, any warning right below them, and an optional
+    // "Why…?" for the curious.
 
+    fn identity_ui(&mut self, ui: &mut egui::Ui) {
+        form_grid("identity").show(ui, |ui| {
+            ui.label("Name or nickname");
+            ui.add(egui::TextEdit::singleline(&mut self.name).hint_text("optional (recommended)"));
+            ui.end_row();
+
+            ui.label("Email");
+            ui.add(egui::TextEdit::singleline(&mut self.email).hint_text("optional"));
+            ui.end_row();
+        });
+        explainer(
+            ui,
+            "Why are these optional?",
+            &[
+                "Your name and email are not part of the security. They are just a label \
+                 written on your public key, so people can tell whose key it is.",
+                "Using PGP for email? Enter your name and email address. Mail apps use the \
+                 address to find your key automatically when someone writes to you.",
+                "Using PGP for something more private? Enter only a nickname and leave the \
+                 email empty. Anyone who gets your public key can read this label, so it \
+                 should not lead back to you.",
+                "Some apps, like Kleopatra, need at least a name or nickname to accept the \
+                 key. That is why it is recommended.",
+            ],
+        );
+    }
+
+    fn expiry_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            for e in Expiry::CHOICES {
+                ui.selectable_value(&mut self.expiry, e, e.label());
+            }
+        });
+        ui.add_space(2.0);
+        if self.expiry == Expiry::Never {
+            warning(ui, &self.expiry.explanation());
+        } else {
+            ui.label(self.expiry.explanation());
+        }
+        explainer(
+            ui,
+            "What happens when it expires?",
+            &[
+                "Nothing is lost. People simply stop using the key for new messages, and \
+                 you can still open the ones you already received.",
+                "Before or after that day, you can push the date forward with any PGP app \
+                 (for example Kleopatra) and keep the very same key.",
+                "The date protects you if you lose the key or forget the passphrase: it \
+                 retires itself instead of staying around forever. That is why a date is \
+                 safer than \"Never\".",
+            ],
+        );
+    }
+
+    fn passphrase_ui(&mut self, ui: &mut egui::Ui) {
+        section_header(ui, "Lock your secret key");
+        ui.checkbox(
+            &mut self.use_passphrase,
+            "Protect the secret key with a passphrase",
+        );
+        if self.use_passphrase {
+            form_grid("passphrase").show(ui, |ui| {
+                ui.label("Passphrase");
+                ui.add(egui::TextEdit::singleline(&mut self.passphrase).password(true));
+                ui.end_row();
+
+                ui.label("Repeat passphrase");
+                ui.add(egui::TextEdit::singleline(&mut self.passphrase_repeat).password(true));
+                ui.end_row();
+            });
+        } else {
+            warning(
+                ui,
+                "Without a passphrase, anyone who gets a copy of your secret key file can \
+                 read your messages and sign as you.",
+            );
+        }
+        explainer(
+            ui,
+            "Why does this matter?",
+            &[
+                "Your secret key is just a file. If someone copies it (a stolen laptop, a \
+                 cloud backup, a virus), they could read your messages and sign as you. \
+                 The passphrase scrambles the file so it is useless without it.",
+                "You will type it whenever you decrypt or sign something.",
+                "There is no \"forgot passphrase\": if you lose it, the key cannot be used \
+                 anymore. Write it down and keep it somewhere safe.",
+                "Turn it off only if the file will live somewhere already protected, like \
+                 an encrypted drive.",
+            ],
+        );
+    }
+
+    /// Key type picker: plain names first, the technical name only as a footnote.
+    fn key_type_ui(&mut self, ui: &mut egui::Ui) {
         let cards = [
             (
                 Algorithm::Cv25519,
@@ -306,23 +351,21 @@ impl ComfyApp {
             }
             ui.add_space(4.0);
         }
+        ui.label(RichText::new("Both are equally secure. Not sure? Keep Modern.").weak());
 
-        egui::CollapsingHeader::new("Why are there two?")
-            .id_salt("why-two")
-            .show(ui, |ui| {
-                ui.label(
-                    "PGP has been around since 1991. RSA is the original kind of key and \
-                     every PGP program understands it. Modern keys use newer math \
-                     (elliptic curves): they give the same protection with much smaller \
-                     keys. GnuPG has supported them since 2014 and makes them by default \
-                     since 2021.",
-                );
-                ui.add_space(4.0);
-                ui.label(
-                    "The choice only affects size, speed and which programs can read your \
-                     key, not how safe your messages are.",
-                );
-            });
+        explainer(
+            ui,
+            "Why are there two?",
+            &[
+                "PGP has been around since 1991. RSA is the original kind of key and \
+                 every PGP program understands it. Modern keys use newer math \
+                 (elliptic curves): they give the same protection with much smaller \
+                 keys. GnuPG has supported them since 2014 and makes them by default \
+                 since 2021.",
+                "The choice only affects size, speed and which programs can read your \
+                 key, not how safe your messages are.",
+            ],
+        );
     }
 
     fn result_ui(&mut self, ui: &mut egui::Ui) {
@@ -401,6 +444,27 @@ impl eframe::App for ComfyApp {
             });
         });
     }
+}
+
+const SECTION_GAP: f32 = 16.0;
+
+fn section_header(ui: &mut egui::Ui, title: &str) {
+    ui.label(RichText::new(title).strong().size(15.0));
+    ui.add_space(4.0);
+}
+
+/// Collapsed "Why…?" section with a few short paragraphs.
+fn explainer(ui: &mut egui::Ui, question: &str, paragraphs: &[&str]) {
+    egui::CollapsingHeader::new(question)
+        .id_salt(question)
+        .show(ui, |ui| {
+            for (i, p) in paragraphs.iter().enumerate() {
+                if i > 0 {
+                    ui.add_space(4.0);
+                }
+                ui.label(*p);
+            }
+        });
 }
 
 fn form_grid(id: &str) -> egui::Grid {
