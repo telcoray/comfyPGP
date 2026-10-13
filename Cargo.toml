@@ -2,7 +2,9 @@
 name = "comfypgp"
 version = "0.1.0"
 edition = "2024"
-description = "comfyPGP - OpenPGP key generator for Windows"
+description = "A friendly OpenPGP app for Windows"
+license = "MIT"
+repository = "https://github.com/telcoray/comfyPGP"
 
 [dependencies]
 anyhow = "1"
