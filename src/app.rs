@@ -6,6 +6,9 @@ use std::time::Duration;
 
 use eframe::egui::{self, Color32, RichText};
 
+use sequoia_openpgp::Cert;
+
+use crate::decrypt;
 use crate::keygen::{self, Algorithm, Encoding, GeneratedKey, KeyRequest, Part};
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
@@ -33,22 +36,6 @@ impl Expiry {
         }
     }
 
-    /// What the choice means in practice, with the actual date.
-    fn explanation(self) -> String {
-        match self {
-            Expiry::Never => "The key never expires by itself. Keep the revocation \
-                              certificate safe: it is your only way to retire the key."
-                .into(),
-            Expiry::Years(n) => {
-                let until = chrono::Local::now() + chrono::Duration::days(365 * n as i64);
-                format!(
-                    "Valid until {}. You can extend it at any time.",
-                    until.format("%-d %B %Y")
-                )
-            }
-        }
-    }
-
     fn duration(self) -> Option<Duration> {
         match self {
             Expiry::Never => None,
@@ -63,7 +50,15 @@ enum Status {
     Error(String),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Generate,
+    Decrypt,
+}
+
 pub struct ComfyApp {
+    tab: Tab,
+
     name: String,
     email: String,
     algorithm: Algorithm,
@@ -75,12 +70,21 @@ pub struct ComfyApp {
     pending: Option<Receiver<anyhow::Result<GeneratedKey>>>,
     key: Option<GeneratedKey>,
     public_armored: String,
+
+    dec_key: Option<Cert>,
+    dec_message: String,
+    /// A binary message opened from a file: (file name, contents).
+    dec_file: Option<(String, Vec<u8>)>,
+    dec_passphrase: String,
+    dec_output: Option<Vec<u8>>,
+
     status: Status,
 }
 
 impl Default for ComfyApp {
     fn default() -> Self {
         Self {
+            tab: Tab::Generate,
             name: String::new(),
             email: String::new(),
             algorithm: Algorithm::Cv25519,
@@ -91,6 +95,11 @@ impl Default for ComfyApp {
             pending: None,
             key: None,
             public_armored: String::new(),
+            dec_key: None,
+            dec_message: String::new(),
+            dec_file: None,
+            dec_passphrase: String::new(),
+            dec_output: None,
             status: Status::None,
         }
     }
@@ -253,16 +262,23 @@ impl ComfyApp {
     }
 
     fn expiry_ui(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            for e in Expiry::CHOICES {
-                ui.selectable_value(&mut self.expiry, e, e.label());
-            }
+        form_grid("expiry").show(ui, |ui| {
+            ui.label("Expires");
+            egui::ComboBox::from_id_salt("expiry")
+                .selected_text(self.expiry.label())
+                .show_ui(ui, |ui| {
+                    for e in Expiry::CHOICES {
+                        ui.selectable_value(&mut self.expiry, e, e.label());
+                    }
+                });
+            ui.end_row();
         });
-        ui.add_space(2.0);
         if self.expiry == Expiry::Never {
-            warning(ui, &self.expiry.explanation());
-        } else {
-            ui.label(self.expiry.explanation());
+            warning(
+                ui,
+                "The key never expires by itself. Keep the revocation certificate safe: \
+                 it is your only way to retire the key.",
+            );
         }
         explainer(
             ui,
@@ -320,6 +336,10 @@ impl ComfyApp {
 
     /// Key type picker: plain names first, the technical name only as a footnote.
     fn key_type_ui(&mut self, ui: &mut egui::Ui) {
+        section_header(ui, "Key type");
+        ui.label(RichText::new("Both are equally secure. Not sure? Keep Modern.").weak());
+        ui.add_space(4.0);
+
         let cards = [
             (
                 Algorithm::Cv25519,
@@ -351,7 +371,6 @@ impl ComfyApp {
             }
             ui.add_space(4.0);
         }
-        ui.label(RichText::new("Both are equally secure. Not sure? Keep Modern.").weak());
 
         explainer(
             ui,
@@ -381,13 +400,7 @@ impl ComfyApp {
                     .strong(),
             );
         });
-        let uid = key
-            .cert
-            .userids()
-            .next()
-            .map(|u| String::from_utf8_lossy(u.userid().value()).into_owned())
-            .unwrap_or_else(|| "(no User ID)".into());
-        ui.label(format!("User ID: {uid}"));
+        ui.label(format!("User ID: {}", user_id_of(&key.cert)));
 
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
@@ -416,6 +429,240 @@ impl ComfyApp {
                 );
             });
     }
+
+    fn decrypt_ui(&mut self, ui: &mut egui::Ui) {
+        section_header(ui, "Your secret key");
+        match &self.dec_key {
+            Some(cert) => {
+                ui.label(format!(
+                    "✔ {}  ·  {}",
+                    user_id_of(cert),
+                    keygen::pretty_fingerprint(cert)
+                ));
+            }
+            None => {
+                ui.label(
+                    RichText::new("Choose the secret key you saved when you created your key.")
+                        .weak(),
+                );
+            }
+        }
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("📂 Open secret key file…").clicked() {
+                self.open_secret_key();
+            }
+            if let Some(key) = &self.key
+                && ui.button("Use the key I just created").clicked()
+            {
+                self.dec_key = Some(key.cert.clone());
+                self.dec_output = None;
+                self.status = Status::None;
+            }
+        });
+        explainer(
+            ui,
+            "Which key do I need?",
+            &[
+                "People lock messages for you with your public key. Only the matching \
+                 secret key can open them: the file you saved with \"Save secret key\".",
+                "A public key file will not work here, and neither will someone else's key.",
+            ],
+        );
+
+        ui.add_space(SECTION_GAP);
+        section_header(ui, "Encrypted message");
+        if let Some((name, _)) = &self.dec_file {
+            let mut clear = false;
+            ui.horizontal(|ui| {
+                ui.label(format!("📄 {name}"));
+                clear = ui.small_button("✕").on_hover_text("Remove file").clicked();
+            });
+            if clear {
+                self.dec_file = None;
+                self.dec_output = None;
+            }
+        } else {
+            ui.add(
+                egui::TextEdit::multiline(&mut self.dec_message)
+                    .hint_text("Paste the message here. It starts with -----BEGIN PGP MESSAGE-----")
+                    .font(egui::TextStyle::Monospace)
+                    .desired_rows(8)
+                    .desired_width(f32::INFINITY),
+            );
+        }
+        if ui.button("📂 Open encrypted file…").clicked() {
+            self.open_encrypted_file();
+        }
+
+        let needs_passphrase = self.dec_key.as_ref().is_some_and(decrypt::needs_passphrase);
+        if needs_passphrase {
+            ui.add_space(SECTION_GAP);
+            form_grid("dec-passphrase").show(ui, |ui| {
+                ui.label("Passphrase");
+                ui.add(egui::TextEdit::singleline(&mut self.dec_passphrase).password(true));
+                ui.end_row();
+            });
+        }
+
+        ui.add_space(SECTION_GAP);
+        let has_message = self.dec_file.is_some() || !self.dec_message.trim().is_empty();
+        let ready = self.dec_key.is_some()
+            && has_message
+            && (!needs_passphrase || !self.dec_passphrase.is_empty());
+        let button = egui::Button::new(RichText::new("🔓  Decrypt").size(16.0));
+        if ui.add_enabled(ready, button).clicked() {
+            self.run_decrypt(needs_passphrase);
+        }
+
+        self.decrypt_result_ui(ui);
+    }
+
+    fn decrypt_result_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(output) = &self.dec_output else {
+            return;
+        };
+
+        ui.separator();
+        ui.heading("Decrypted message");
+        let text = std::str::from_utf8(output).ok();
+        let mut copy = false;
+        let mut save = false;
+        ui.horizontal(|ui| {
+            if text.is_some() {
+                copy = ui.button("📋 Copy").clicked();
+            }
+            save = ui.button("💾 Save…").clicked();
+        });
+        match text {
+            Some(text) => {
+                ui.add_space(6.0);
+                egui::ScrollArea::vertical()
+                    .max_height(260.0)
+                    .show(ui, |ui| {
+                        ui.add(egui::TextEdit::multiline(&mut &*text).desired_width(f32::INFINITY));
+                    });
+            }
+            None => {
+                ui.label(format!(
+                    "The message contains a file ({} KB). Save it to open it.",
+                    output.len().div_ceil(1024)
+                ));
+            }
+        }
+
+        if copy && let Some(text) = text {
+            let text = text.to_owned();
+            self.status = match arboard::Clipboard::new().and_then(|mut c| c.set_text(text)) {
+                Ok(()) => Status::Info("Decrypted message copied to clipboard.".into()),
+                Err(e) => Status::Error(format!("Could not copy: {e}")),
+            };
+        }
+        if save {
+            self.save_decrypted();
+        }
+    }
+
+    fn open_secret_key(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Open your secret key")
+            .add_filter(
+                "PGP key (.asc, .txt, .gpg, .key)",
+                &["asc", "txt", "gpg", "key"],
+            )
+            .add_filter("All files", &["*"])
+            .pick_file()
+        else {
+            return;
+        };
+        let result = std::fs::read(&path)
+            .map_err(anyhow::Error::from)
+            .and_then(|bytes| decrypt::load_secret_key(&bytes));
+        match result {
+            Ok(cert) => {
+                self.dec_key = Some(cert);
+                self.dec_passphrase.clear();
+                self.dec_output = None;
+                self.status = Status::None;
+            }
+            Err(e) => self.status = Status::Error(format!("{e:#}")),
+        }
+    }
+
+    fn open_encrypted_file(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Open an encrypted message")
+            .add_filter(
+                "PGP message (.asc, .txt, .gpg, .pgp)",
+                &["asc", "txt", "gpg", "pgp"],
+            )
+            .add_filter("All files", &["*"])
+            .pick_file()
+        else {
+            return;
+        };
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                self.status = Status::Error(format!("Could not open the file: {e}"));
+                return;
+            }
+        };
+        self.dec_output = None;
+        self.status = Status::None;
+        // Text messages go in the box, so people can see what they opened.
+        match String::from_utf8(bytes) {
+            Ok(text) if text.contains("-----BEGIN PGP") => {
+                self.dec_file = None;
+                self.dec_message = text;
+            }
+            Ok(text) => self.dec_file = Some((file_name(&path), text.into_bytes())),
+            Err(e) => self.dec_file = Some((file_name(&path), e.into_bytes())),
+        }
+    }
+
+    fn run_decrypt(&mut self, needs_passphrase: bool) {
+        let Some(cert) = &self.dec_key else { return };
+        let message = match &self.dec_file {
+            Some((_, bytes)) => bytes.as_slice(),
+            None => self.dec_message.trim().as_bytes(),
+        };
+        let passphrase = needs_passphrase.then_some(self.dec_passphrase.as_str());
+        match decrypt::decrypt(cert, passphrase, message) {
+            Ok(plaintext) => {
+                self.dec_output = Some(plaintext);
+                self.dec_passphrase.clear();
+                self.status = Status::Info("Message decrypted.".into());
+            }
+            Err(e) => {
+                self.dec_output = None;
+                self.status = Status::Error(format!("{e:#}"));
+            }
+        }
+    }
+
+    fn save_decrypted(&mut self) {
+        let Some(output) = &self.dec_output else {
+            return;
+        };
+        // "letter.txt.gpg" -> "letter.txt"; pasted text -> "decrypted.txt".
+        let suggested = self
+            .dec_file
+            .as_ref()
+            .and_then(|(name, _)| Path::new(name).file_stem())
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "decrypted.txt".into());
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Save decrypted message")
+            .set_file_name(suggested)
+            .save_file()
+        else {
+            return;
+        };
+        self.status = match std::fs::write(&path, output) {
+            Ok(()) => Status::Info(format!("Saved to {}", path.display())),
+            Err(e) => Status::Error(format!("Could not save: {e}")),
+        };
+    }
 }
 
 impl eframe::App for ComfyApp {
@@ -437,16 +684,41 @@ impl eframe::App for ComfyApp {
         egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("comfyPGP");
-                ui.label(RichText::new("OpenPGP key generator").weak());
-                ui.add_space(10.0);
-                self.form_ui(ui);
-                self.result_ui(ui);
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let generate = RichText::new("🔑 Generate key").size(15.0);
+                    let decrypt = RichText::new("🔓 Decrypt").size(15.0);
+                    ui.selectable_value(&mut self.tab, Tab::Generate, generate);
+                    ui.selectable_value(&mut self.tab, Tab::Decrypt, decrypt);
+                });
+                ui.separator();
+                ui.add_space(6.0);
+                match self.tab {
+                    Tab::Generate => {
+                        self.form_ui(ui);
+                        self.result_ui(ui);
+                    }
+                    Tab::Decrypt => self.decrypt_ui(ui),
+                }
             });
         });
     }
 }
 
 const SECTION_GAP: f32 = 16.0;
+
+fn user_id_of(cert: &Cert) -> String {
+    cert.userids()
+        .next()
+        .map(|u| String::from_utf8_lossy(u.userid().value()).into_owned())
+        .unwrap_or_else(|| "(no User ID)".into())
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
 
 fn section_header(ui: &mut egui::Ui, title: &str) {
     ui.label(RichText::new(title).strong().size(15.0));
