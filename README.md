@@ -14,6 +14,7 @@ plain-language explanation, so you never have to guess what an option means.
   - Optional passphrase to protect the secret key
 - **Export** the public key, secret key and revocation certificate as
   `.asc`, `.txt` or binary `.gpg`, or copy the public key to the clipboard
+- **Encrypt** a message or a file for one or more people, using their public keys
 - **Decrypt** messages: paste the text or open a file, use your secret key,
   then copy or save the result
 - Works with GnuPG, Kleopatra, Thunderbird and other OpenPGP apps
@@ -46,7 +47,7 @@ implement any cryptography of its own. The interface is built with
 
 - Decryption does not verify signatures yet: a signed message is decrypted,
   but comfyPGP does not tell you who signed it.
-- Encrypting and signing are not available yet.
+- Signing is not available yet: encrypted messages are not signed.
 
 ## License
 

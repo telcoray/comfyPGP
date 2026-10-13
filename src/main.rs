@@ -3,6 +3,7 @@
 
 mod app;
 mod decrypt;
+mod encrypt;
 mod keygen;
 
 fn main() -> eframe::Result {

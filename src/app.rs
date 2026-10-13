@@ -8,8 +8,8 @@ use eframe::egui::{self, Color32, RichText};
 
 use sequoia_openpgp::Cert;
 
-use crate::decrypt;
 use crate::keygen::{self, Algorithm, Encoding, GeneratedKey, KeyRequest, Part};
+use crate::{decrypt, encrypt};
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
 
@@ -53,6 +53,7 @@ enum Status {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Generate,
+    Encrypt,
     Decrypt,
 }
 
@@ -70,6 +71,14 @@ pub struct ComfyApp {
     pending: Option<Receiver<anyhow::Result<GeneratedKey>>>,
     key: Option<GeneratedKey>,
     public_armored: String,
+
+    enc_recipients: Vec<Cert>,
+    enc_message: String,
+    /// A file to encrypt instead of the text: (file name, contents).
+    enc_file: Option<(String, Vec<u8>)>,
+    enc_output: Option<String>,
+    /// Feedback on adding recipients, shown right under the buttons.
+    enc_notice: Status,
 
     dec_key: Option<Cert>,
     dec_message: String,
@@ -95,6 +104,11 @@ impl Default for ComfyApp {
             pending: None,
             key: None,
             public_armored: String::new(),
+            enc_recipients: Vec::new(),
+            enc_message: String::new(),
+            enc_file: None,
+            enc_output: None,
+            enc_notice: Status::None,
             dec_key: None,
             dec_message: String::new(),
             dec_file: None,
@@ -430,6 +444,263 @@ impl ComfyApp {
             });
     }
 
+    fn encrypt_ui(&mut self, ui: &mut egui::Ui) {
+        section_header(ui, "Recipients");
+        if self.enc_recipients.is_empty() {
+            ui.label(RichText::new("Add the public key of the person you are writing to.").weak());
+        }
+        let mut remove = None;
+        for (i, cert) in self.enc_recipients.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(format!(
+                    "✔ {}  ·  {}",
+                    user_id_of(cert),
+                    keygen::pretty_fingerprint(cert)
+                ));
+                if ui.small_button("✕").on_hover_text("Remove").clicked() {
+                    remove = Some(i);
+                }
+            });
+            if encrypt::uses_old_technology(cert) {
+                warning(
+                    ui,
+                    "This key uses old technology (SHA-1). It still works, but if you can, \
+                     ask its owner for a newer key.",
+                );
+            }
+        }
+        if let Some(i) = remove {
+            self.enc_recipients.remove(i);
+            self.enc_output = None;
+            self.enc_notice = Status::None;
+        }
+        let mine = self.key.as_ref().map(|k| k.cert.clone());
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("📂 Open public key file…").clicked() {
+                self.open_recipient_key();
+            }
+            if ui.button("📋 Paste public key").clicked() {
+                self.paste_recipient_key();
+            }
+            if let Some(cert) = mine
+                && ui.button("Add the key I just created").clicked()
+            {
+                self.add_recipient(cert);
+            }
+        });
+        match &self.enc_notice {
+            Status::None => {}
+            Status::Info(msg) => {
+                ui.label(RichText::new(msg).weak());
+            }
+            Status::Error(msg) => {
+                ui.colored_label(ERROR_COLOR, msg);
+            }
+        }
+        explainer(
+            ui,
+            "Whose key do I need?",
+            &[
+                "To send someone a secret message you need their public key. They can \
+                 send it to you, or publish it on their website or a key server.",
+                "Once encrypted, only the recipients can open the message: not even you. \
+                 Add your own public key too if you want to read it again later.",
+            ],
+        );
+
+        ui.add_space(SECTION_GAP);
+        section_header(ui, "Message");
+        if let Some((name, _)) = &self.enc_file {
+            let mut clear = false;
+            ui.horizontal(|ui| {
+                ui.label(format!("📄 {name}"));
+                clear = ui.small_button("✕").on_hover_text("Remove file").clicked();
+            });
+            if clear {
+                self.enc_file = None;
+            }
+        } else {
+            let edit = ui.add(
+                egui::TextEdit::multiline(&mut self.enc_message)
+                    .hint_text("Write your message here.")
+                    .desired_rows(8)
+                    .desired_width(f32::INFINITY),
+            );
+            if edit.changed() {
+                self.enc_output = None;
+            }
+        }
+        if ui.button("📂 Encrypt a file instead…").clicked() {
+            self.pick_file_to_encrypt();
+        }
+
+        ui.add_space(SECTION_GAP);
+        let has_message = self.enc_file.is_some() || !self.enc_message.trim().is_empty();
+        let ready = !self.enc_recipients.is_empty() && has_message;
+        let button = egui::Button::new(RichText::new("🔒  Encrypt").size(16.0));
+        if ui.add_enabled(ready, button).clicked() {
+            self.run_encrypt();
+        }
+
+        self.encrypt_result_ui(ui);
+    }
+
+    fn encrypt_result_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(output) = &self.enc_output else {
+            return;
+        };
+
+        ui.separator();
+        ui.heading("Encrypted message");
+        ui.label("Send this text to the recipients. Only they can open it.");
+        let mut copy = false;
+        let mut save = false;
+        ui.horizontal(|ui| {
+            copy = ui.button("📋 Copy").clicked();
+            save = ui.button("💾 Save…").clicked();
+        });
+        ui.add_space(6.0);
+        egui::ScrollArea::vertical()
+            .max_height(260.0)
+            .show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut output.as_str())
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(f32::INFINITY),
+                );
+            });
+
+        if copy {
+            let text = output.clone();
+            self.status = match arboard::Clipboard::new().and_then(|mut c| c.set_text(text)) {
+                Ok(()) => Status::Info("Encrypted message copied to clipboard.".into()),
+                Err(e) => Status::Error(format!("Could not copy: {e}")),
+            };
+        }
+        if save
+            && let Some(path) = rfd::FileDialog::new()
+                .set_title("Save encrypted message")
+                .set_file_name("message.asc")
+                .add_filter("ASCII armored text (.asc)", &["asc"])
+                .add_filter("Text (.txt)", &["txt"])
+                .save_file()
+        {
+            self.status = match std::fs::write(&path, output) {
+                Ok(()) => Status::Info(format!("Saved to {}", path.display())),
+                Err(e) => Status::Error(format!("Could not save: {e}")),
+            };
+        }
+    }
+
+    fn add_recipient(&mut self, cert: Cert) {
+        if let Err(e) = encrypt::check_can_encrypt(&cert) {
+            self.enc_notice = Status::Error(format!("{e:#}"));
+            return;
+        }
+        if self
+            .enc_recipients
+            .iter()
+            .any(|c| c.fingerprint() == cert.fingerprint())
+        {
+            self.enc_notice = Status::Info("This key is already in the list.".into());
+            return;
+        }
+        self.enc_recipients.push(cert);
+        self.enc_output = None;
+        self.enc_notice = Status::None;
+    }
+
+    fn open_recipient_key(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Open a public key")
+            .add_filter(
+                "PGP key (.asc, .txt, .gpg, .key)",
+                &["asc", "txt", "gpg", "key"],
+            )
+            .add_filter("All files", &["*"])
+            .pick_file()
+        else {
+            return;
+        };
+        match std::fs::read(&path)
+            .map_err(anyhow::Error::from)
+            .and_then(|bytes| encrypt::load_public_key(&bytes))
+        {
+            Ok(cert) => self.add_recipient(cert),
+            Err(e) => self.enc_notice = Status::Error(format!("{e:#}")),
+        }
+    }
+
+    fn paste_recipient_key(&mut self) {
+        let text = match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+            Ok(text) => text,
+            Err(_) => {
+                self.enc_notice =
+                    Status::Error("The clipboard is empty. Copy a public key first.".into());
+                return;
+            }
+        };
+        match encrypt::load_public_key(text.trim().as_bytes()) {
+            Ok(cert) => self.add_recipient(cert),
+            Err(e) => self.enc_notice = Status::Error(format!("{e:#}")),
+        }
+    }
+
+    fn pick_file_to_encrypt(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Choose a file to encrypt")
+            .pick_file()
+        else {
+            return;
+        };
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                self.enc_file = Some((file_name(&path), bytes));
+                self.enc_output = None;
+                self.status = Status::None;
+            }
+            Err(e) => self.status = Status::Error(format!("Could not open the file: {e}")),
+        }
+    }
+
+    fn run_encrypt(&mut self) {
+        match &self.enc_file {
+            // Files are saved as binary .gpg right away, like GnuPG does.
+            Some((name, bytes)) => {
+                let encrypted = match encrypt::encrypt(&self.enc_recipients, bytes, false) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        self.status = Status::Error(format!("{e:#}"));
+                        return;
+                    }
+                };
+                let Some(path) = rfd::FileDialog::new()
+                    .set_title("Save encrypted file")
+                    .set_file_name(format!("{name}.gpg"))
+                    .add_filter("Encrypted file (.gpg)", &["gpg"])
+                    .save_file()
+                else {
+                    return;
+                };
+                self.status = match std::fs::write(&path, encrypted) {
+                    Ok(()) => Status::Info(format!("Encrypted file saved to {}", path.display())),
+                    Err(e) => Status::Error(format!("Could not save: {e}")),
+                };
+            }
+            None => {
+                match encrypt::encrypt(&self.enc_recipients, self.enc_message.as_bytes(), true)
+                    .and_then(|bytes| Ok(String::from_utf8(bytes)?))
+                {
+                    Ok(text) => {
+                        self.enc_output = Some(text);
+                        self.status = Status::Info("Message encrypted.".into());
+                    }
+                    Err(e) => self.status = Status::Error(format!("{e:#}")),
+                }
+            }
+        }
+    }
+
     fn decrypt_ui(&mut self, ui: &mut egui::Ui) {
         section_header(ui, "Your secret key");
         match &self.dec_key {
@@ -677,7 +948,7 @@ impl eframe::App for ComfyApp {
                 ui.label(msg);
             }
             Status::Error(msg) => {
-                ui.colored_label(Color32::from_rgb(220, 70, 70), msg);
+                ui.colored_label(ERROR_COLOR, msg);
             }
         });
 
@@ -687,8 +958,10 @@ impl eframe::App for ComfyApp {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     let generate = RichText::new("🔑 Generate key").size(15.0);
+                    let encrypt = RichText::new("🔒 Encrypt").size(15.0);
                     let decrypt = RichText::new("🔓 Decrypt").size(15.0);
                     ui.selectable_value(&mut self.tab, Tab::Generate, generate);
+                    ui.selectable_value(&mut self.tab, Tab::Encrypt, encrypt);
                     ui.selectable_value(&mut self.tab, Tab::Decrypt, decrypt);
                 });
                 ui.separator();
@@ -698,6 +971,7 @@ impl eframe::App for ComfyApp {
                         self.form_ui(ui);
                         self.result_ui(ui);
                     }
+                    Tab::Encrypt => self.encrypt_ui(ui),
                     Tab::Decrypt => self.decrypt_ui(ui),
                 }
             });
@@ -706,6 +980,7 @@ impl eframe::App for ComfyApp {
 }
 
 const SECTION_GAP: f32 = 16.0;
+const ERROR_COLOR: Color32 = Color32::from_rgb(220, 70, 70);
 
 fn user_id_of(cert: &Cert) -> String {
     cert.userids()
