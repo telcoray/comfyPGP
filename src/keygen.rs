@@ -7,7 +7,8 @@ use openpgp::cert::prelude::*;
 use openpgp::crypto::Password;
 use openpgp::packet::Signature;
 use openpgp::serialize::{Marshal, SerializeInto};
-use openpgp::{Packet, armor};
+use openpgp::types::Features;
+use openpgp::{Packet, Profile, armor};
 use sequoia_openpgp as openpgp;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -53,6 +54,11 @@ pub fn user_id(name: &str, email: &str) -> Option<String> {
 
 pub fn generate(req: &KeyRequest) -> Result<GeneratedKey> {
     let mut builder = CertBuilder::new()
+        // v4 keys that only advertise SEIPDv1: GnuPG and Kleopatra cannot
+        // read SEIPDv2 (RFC 9580) messages, which Sequoia would otherwise
+        // invite senders to use.
+        .set_profile(Profile::RFC4880)?
+        .set_features(Features::empty().set_seipdv1())?
         .set_cipher_suite(req.algorithm.suite())
         .set_validity_period(req.validity)
         .add_signing_subkey()
@@ -176,6 +182,16 @@ mod tests {
             assert!(secret.is_tsk());
             assert_eq!(public.fingerprint(), key.cert.fingerprint());
         }
+    }
+
+    #[test]
+    fn gnupg_compatible_format() {
+        let key = generate(&request(None, None)).unwrap();
+        assert_eq!(key.cert.primary_key().key().version(), 4);
+        let p = openpgp::policy::StandardPolicy::new();
+        let features = key.cert.with_policy(&p, None).unwrap().features().unwrap();
+        assert!(features.supports_seipdv1());
+        assert!(!features.supports_seipdv2());
     }
 
     #[test]
