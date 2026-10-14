@@ -8,6 +8,7 @@ use eframe::egui::{self, Color32, RichText};
 
 use sequoia_openpgp::Cert;
 
+use crate::decrypt::SignatureCheck;
 use crate::keygen::{self, Algorithm, Encoding, GeneratedKey, KeyRequest, Part};
 use crate::{decrypt, encrypt};
 
@@ -85,7 +86,10 @@ pub struct ComfyApp {
     /// A binary message opened from a file: (file name, contents).
     dec_file: Option<(String, Vec<u8>)>,
     dec_passphrase: String,
-    dec_output: Option<Vec<u8>>,
+    /// Public keys of people who may have signed the message.
+    dec_senders: Vec<Cert>,
+    dec_sender_notice: Status,
+    dec_output: Option<decrypt::Decrypted>,
 
     status: Status,
 }
@@ -113,6 +117,8 @@ impl Default for ComfyApp {
             dec_message: String::new(),
             dec_file: None,
             dec_passphrase: String::new(),
+            dec_senders: Vec::new(),
+            dec_sender_notice: Status::None,
             dec_output: None,
             status: Status::None,
         }
@@ -451,16 +457,9 @@ impl ComfyApp {
         }
         let mut remove = None;
         for (i, cert) in self.enc_recipients.iter().enumerate() {
-            ui.horizontal(|ui| {
-                ui.label(format!(
-                    "✔ {}  ·  {}",
-                    user_id_of(cert),
-                    keygen::pretty_fingerprint(cert)
-                ));
-                if ui.small_button("✕").on_hover_text("Remove").clicked() {
-                    remove = Some(i);
-                }
-            });
+            if cert_row(ui, cert) {
+                remove = Some(i);
+            }
             if encrypt::uses_old_technology(cert) {
                 warning(
                     ui,
@@ -476,11 +475,13 @@ impl ComfyApp {
         }
         let mine = self.key.as_ref().map(|k| k.cert.clone());
         ui.horizontal_wrapped(|ui| {
-            if ui.button("📂 Open public key file…").clicked() {
-                self.open_recipient_key();
+            if ui.button("📂 Open public key file…").clicked()
+                && let Some(bytes) = pick_key_file("Open a public key")
+            {
+                self.add_recipient_from(bytes);
             }
             if ui.button("📋 Paste public key").clicked() {
-                self.paste_recipient_key();
+                self.add_recipient_from(clipboard_key());
             }
             if let Some(cert) = mine
                 && ui.button("Add the key I just created").clicked()
@@ -488,15 +489,7 @@ impl ComfyApp {
                 self.add_recipient(cert);
             }
         });
-        match &self.enc_notice {
-            Status::None => {}
-            Status::Info(msg) => {
-                ui.label(RichText::new(msg).weak());
-            }
-            Status::Error(msg) => {
-                ui.colored_label(ERROR_COLOR, msg);
-            }
-        }
+        notice_ui(ui, &self.enc_notice);
         explainer(
             ui,
             "Whose key do I need?",
@@ -610,37 +603,8 @@ impl ComfyApp {
         self.enc_notice = Status::None;
     }
 
-    fn open_recipient_key(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .set_title("Open a public key")
-            .add_filter(
-                "PGP key (.asc, .txt, .gpg, .key)",
-                &["asc", "txt", "gpg", "key"],
-            )
-            .add_filter("All files", &["*"])
-            .pick_file()
-        else {
-            return;
-        };
-        match std::fs::read(&path)
-            .map_err(anyhow::Error::from)
-            .and_then(|bytes| encrypt::load_public_key(&bytes))
-        {
-            Ok(cert) => self.add_recipient(cert),
-            Err(e) => self.enc_notice = Status::Error(format!("{e:#}")),
-        }
-    }
-
-    fn paste_recipient_key(&mut self) {
-        let text = match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
-            Ok(text) => text,
-            Err(_) => {
-                self.enc_notice =
-                    Status::Error("The clipboard is empty. Copy a public key first.".into());
-                return;
-            }
-        };
-        match encrypt::load_public_key(text.trim().as_bytes()) {
+    fn add_recipient_from(&mut self, bytes: anyhow::Result<Vec<u8>>) {
+        match bytes.and_then(|bytes| encrypt::load_public_key(&bytes)) {
             Ok(cert) => self.add_recipient(cert),
             Err(e) => self.enc_notice = Status::Error(format!("{e:#}")),
         }
@@ -765,6 +729,9 @@ impl ComfyApp {
             self.open_encrypted_file();
         }
 
+        ui.add_space(SECTION_GAP);
+        self.sender_ui(ui);
+
         let needs_passphrase = self.dec_key.as_ref().is_some_and(decrypt::needs_passphrase);
         if needs_passphrase {
             ui.add_space(SECTION_GAP);
@@ -788,13 +755,82 @@ impl ComfyApp {
         self.decrypt_result_ui(ui);
     }
 
+    fn sender_ui(&mut self, ui: &mut egui::Ui) {
+        section_header(ui, "Sender (optional)");
+        if self.dec_senders.is_empty() {
+            ui.label(
+                RichText::new("Add the sender's public key to check who wrote the message.").weak(),
+            );
+        }
+        let mut remove = None;
+        for (i, cert) in self.dec_senders.iter().enumerate() {
+            if cert_row(ui, cert) {
+                remove = Some(i);
+            }
+        }
+        if let Some(i) = remove {
+            self.dec_senders.remove(i);
+            self.dec_output = None;
+            self.dec_sender_notice = Status::None;
+        }
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("📂 Open public key file…").clicked()
+                && let Some(bytes) = pick_key_file("Open the sender's public key")
+            {
+                self.add_sender_from(bytes);
+            }
+            if ui.button("📋 Paste public key").clicked() {
+                self.add_sender_from(clipboard_key());
+            }
+        });
+        notice_ui(ui, &self.dec_sender_notice);
+        explainer(
+            ui,
+            "Why add the sender's key?",
+            &[
+                "If the sender signed the message, their public key lets comfyPGP check \
+                 that they really wrote it and that nobody changed it on the way.",
+                "Without it you can still read the message, but you cannot be sure who \
+                 sent it.",
+            ],
+        );
+    }
+
+    fn add_sender_from(&mut self, bytes: anyhow::Result<Vec<u8>>) {
+        let cert = match bytes.and_then(|bytes| decrypt::load_sender_key(&bytes)) {
+            Ok(cert) => cert,
+            Err(e) => {
+                self.dec_sender_notice = Status::Error(format!("{e:#}"));
+                return;
+            }
+        };
+        if self
+            .dec_senders
+            .iter()
+            .any(|c| c.fingerprint() == cert.fingerprint())
+        {
+            self.dec_sender_notice = Status::Info("This key is already in the list.".into());
+            return;
+        }
+        self.dec_senders.push(cert);
+        self.dec_sender_notice = Status::None;
+        // The shown result no longer matches the keys: decrypt again.
+        if self.dec_output.take().is_some() {
+            self.dec_sender_notice =
+                Status::Info("Key added. Click Decrypt again to check the signature.".into());
+        }
+    }
+
     fn decrypt_result_ui(&mut self, ui: &mut egui::Ui) {
-        let Some(output) = &self.dec_output else {
+        let Some(decrypted) = &self.dec_output else {
             return;
         };
+        let output = &decrypted.plaintext;
 
         ui.separator();
         ui.heading("Decrypted message");
+        signature_banner(ui, &decrypted.signature);
+        ui.add_space(6.0);
         let text = std::str::from_utf8(output).ok();
         let mut copy = false;
         let mut save = false;
@@ -898,10 +934,9 @@ impl ComfyApp {
             None => self.dec_message.trim().as_bytes(),
         };
         let passphrase = needs_passphrase.then_some(self.dec_passphrase.as_str());
-        match decrypt::decrypt(cert, passphrase, message) {
-            Ok(plaintext) => {
-                self.dec_output = Some(plaintext);
-                self.dec_passphrase.clear();
+        match decrypt::decrypt(cert, passphrase, message, &self.dec_senders) {
+            Ok(decrypted) => {
+                self.dec_output = Some(decrypted);
                 self.status = Status::Info("Message decrypted.".into());
             }
             Err(e) => {
@@ -912,7 +947,7 @@ impl ComfyApp {
     }
 
     fn save_decrypted(&mut self) {
-        let Some(output) = &self.dec_output else {
+        let Some(output) = self.dec_output.as_ref().map(|d| &d.plaintext) else {
             return;
         };
         // "letter.txt.gpg" -> "letter.txt"; pasted text -> "decrypted.txt".
@@ -987,6 +1022,128 @@ fn user_id_of(cert: &Cert) -> String {
         .next()
         .map(|u| String::from_utf8_lossy(u.userid().value()).into_owned())
         .unwrap_or_else(|| "(no User ID)".into())
+}
+
+/// One key in a list: name and fingerprint, with a ✕ to remove it.
+/// Returns `true` when ✕ is clicked.
+fn cert_row(ui: &mut egui::Ui, cert: &Cert) -> bool {
+    ui.horizontal(|ui| {
+        ui.label(format!(
+            "✔ {}  ·  {}",
+            user_id_of(cert),
+            keygen::pretty_fingerprint(cert)
+        ));
+        ui.small_button("✕").on_hover_text("Remove").clicked()
+    })
+    .inner
+}
+
+fn notice_ui(ui: &mut egui::Ui, notice: &Status) {
+    match notice {
+        Status::None => {}
+        Status::Info(msg) => {
+            ui.label(RichText::new(msg).weak());
+        }
+        Status::Error(msg) => {
+            ui.colored_label(ERROR_COLOR, msg);
+        }
+    }
+}
+
+/// Asks for a key file. `None` if the dialog was cancelled.
+fn pick_key_file(title: &str) -> Option<anyhow::Result<Vec<u8>>> {
+    let path = rfd::FileDialog::new()
+        .set_title(title)
+        .add_filter(
+            "PGP key (.asc, .txt, .gpg, .key)",
+            &["asc", "txt", "gpg", "key"],
+        )
+        .add_filter("All files", &["*"])
+        .pick_file()?;
+    Some(std::fs::read(path).map_err(Into::into))
+}
+
+fn clipboard_key() -> anyhow::Result<Vec<u8>> {
+    match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+        Ok(text) => Ok(text.trim().as_bytes().to_vec()),
+        Err(_) => anyhow::bail!("The clipboard is empty. Copy a public key first."),
+    }
+}
+
+/// The colored box above a decrypted message saying who signed it.
+fn signature_banner(ui: &mut egui::Ui, check: &SignatureCheck) {
+    let green = Color32::from_rgb(60, 140, 90);
+    let amber = Color32::from_rgb(210, 150, 40);
+    let grey = ui.visuals().weak_text_color();
+
+    let (color, title, detail): (Color32, String, String) = match check {
+        SignatureCheck::Good { signer } => (
+            green,
+            format!("✔ Signed by {}", user_id_of(signer)),
+            format!("Key: {}", keygen::pretty_fingerprint(signer)),
+        ),
+        SignatureCheck::UnknownSigner { issuer } => (
+            amber,
+            "⚠ Signed, but you don't have the sender's key".into(),
+            match issuer {
+                Some(id) => format!(
+                    "Add the sender's public key above and decrypt again.\nSigner's key: {id}"
+                ),
+                None => "Add the sender's public key above and decrypt again.".into(),
+            },
+        ),
+        SignatureCheck::KeyProblem { signer, reason } => (
+            amber,
+            format!(
+                "⚠ Signed by {}, but there is a problem with their key",
+                user_id_of(signer)
+            ),
+            (*reason).into(),
+        ),
+        SignatureCheck::Bad { signer } => (
+            ERROR_COLOR,
+            "✖ The signature is not valid".into(),
+            match signer {
+                Some(signer) => format!(
+                    "The message may have been changed after {} signed it. Do not trust it.",
+                    user_id_of(signer)
+                ),
+                None => {
+                    "The message may have been changed after it was signed. Do not trust it.".into()
+                }
+            },
+        ),
+        SignatureCheck::NotSigned => (
+            grey,
+            "Not signed".into(),
+            "There is no way to know who wrote this message.".into(),
+        ),
+    };
+
+    egui::Frame::new()
+        .fill(color.gamma_multiply(0.12))
+        .stroke(egui::Stroke::new(1.0, color))
+        .corner_radius(6.0)
+        .inner_margin(10.0)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(title).strong().color(color));
+            ui.label(detail);
+        });
+
+    if !matches!(check, SignatureCheck::NotSigned) {
+        explainer(
+            ui,
+            "Can I trust this?",
+            &[
+                "A valid signature proves two things: the message was written with this \
+                 key, and nobody changed it on the way.",
+                "It does not prove who owns the key. Anyone can create a key with any name. \
+                 The first time you get someone's key, compare its fingerprint with them \
+                 through another channel: in person, by phone, or on their website.",
+            ],
+        );
+    }
 }
 
 fn file_name(path: &Path) -> String {

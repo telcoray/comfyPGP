@@ -5,6 +5,7 @@ mod app;
 mod decrypt;
 mod encrypt;
 mod keygen;
+mod policy;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {

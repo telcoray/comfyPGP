@@ -5,23 +5,12 @@ use std::io::Write;
 use anyhow::{Result, anyhow, bail};
 use openpgp::Cert;
 use openpgp::parse::Parse;
-use openpgp::policy::{HashAlgoSecurity, Policy, StandardPolicy};
+use openpgp::policy::{Policy, StandardPolicy};
 use openpgp::serialize::stream::{Armorer, Encryptor, LiteralWriter, Message, Recipient};
-use openpgp::types::{HashAlgorithm, RevocationStatus};
+use openpgp::types::RevocationStatus;
 use sequoia_openpgp as openpgp;
 
-/// Sequoia's standard policy, but accepting SHA-1 in a key's signatures
-/// on itself, like GnuPG does. Many keys made before ~2016 use it, and
-/// these signatures only need second pre-image resistance, which SHA-1
-/// still has. SHA-1 stays rejected wherever collisions matter.
-fn policy() -> StandardPolicy<'static> {
-    let mut p = StandardPolicy::new();
-    p.accept_hash_property(
-        HashAlgorithm::SHA1,
-        HashAlgoSecurity::SecondPreImageResistance,
-    );
-    p
-}
+use crate::policy::policy;
 
 /// Reads a recipient's key (armored or binary). A secret key file works
 /// too: only its public part is used.
@@ -128,7 +117,10 @@ mod tests {
             let msg = encrypt(&[a.clone(), b.clone()], b"for both", armor).unwrap();
             assert_eq!(msg.starts_with(b"-----BEGIN PGP MESSAGE-----"), armor);
             for cert in [&a, &b] {
-                assert_eq!(decrypt::decrypt(cert, None, &msg).unwrap(), b"for both");
+                assert_eq!(
+                    decrypt::decrypt(cert, None, &msg, &[]).unwrap().plaintext,
+                    b"for both"
+                );
             }
         }
     }
@@ -139,7 +131,12 @@ mod tests {
         let secret = keygen::export(&key, Part::Secret, Encoding::Armored).unwrap();
         let recipient = load_public_key(&secret).unwrap();
         let msg = encrypt(&[recipient], b"hi", true).unwrap();
-        assert_eq!(decrypt::decrypt(&key.cert, None, &msg).unwrap(), b"hi");
+        assert_eq!(
+            decrypt::decrypt(&key.cert, None, &msg, &[])
+                .unwrap()
+                .plaintext,
+            b"hi"
+        );
     }
 
     #[test]
@@ -274,7 +271,7 @@ mod tests {
                     .success()
             );
 
-            let msg = encrypt(&[key.cert.clone()], b"from comfyPGP", true).unwrap();
+            let msg = encrypt(std::slice::from_ref(&key.cert), b"from comfyPGP", true).unwrap();
             let mut child = gpg()
                 .arg("--decrypt")
                 .stdin(Stdio::piped())

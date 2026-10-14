@@ -17,6 +17,8 @@ plain-language explanation, so you never have to guess what an option means.
 - **Encrypt** a message or a file for one or more people, using their public keys
 - **Decrypt** messages: paste the text or open a file, use your secret key,
   then copy or save the result
+- **Check signatures** on received messages: add the sender's public key to see
+  who signed the message and whether it was changed
 - Works with GnuPG, Kleopatra, Thunderbird and other OpenPGP apps
 - A single `.exe`, no installer and no external DLLs
 
@@ -45,9 +47,10 @@ implement any cryptography of its own. The interface is built with
 
 ## Current limitations
 
-- Decryption does not verify signatures yet: a signed message is decrypted,
-  but comfyPGP does not tell you who signed it.
 - Signing is not available yet: encrypted messages are not signed.
+- Messages in GnuPG's own OCB format cannot be opened yet. GnuPG uses it for
+  keys created with GnuPG 2.4+ or Kleopatra; messages to keys created with
+  comfyPGP are not affected.
 
 ## License
 

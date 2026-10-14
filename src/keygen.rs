@@ -164,7 +164,7 @@ mod tests {
         let vc = key.cert.with_policy(&p, None).unwrap();
         assert_eq!(vc.primary_key().key_expiration_time(), None);
         assert!(
-            key.cert
+            !key.cert
                 .primary_key()
                 .key()
                 .clone()
@@ -172,7 +172,6 @@ mod tests {
                 .unwrap()
                 .secret()
                 .is_encrypted()
-                == false
         );
 
         for enc in [Encoding::Armored, Encoding::Binary] {
