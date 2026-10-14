@@ -53,7 +53,6 @@ cryptography of its own. The interface is built with
 
 - Signing is not available yet: encrypted messages are not signed.
 
-
 ## License
 
 comfyPGP is released under the [MIT License](LICENSE).
