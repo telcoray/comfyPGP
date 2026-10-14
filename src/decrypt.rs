@@ -14,6 +14,7 @@ use openpgp::types::SymmetricAlgorithm;
 use openpgp::{Cert, KeyHandle};
 use sequoia_openpgp as openpgp;
 
+use crate::fallback;
 use crate::policy::policy;
 
 /// What we could tell about who wrote a decrypted message.
@@ -42,7 +43,7 @@ pub enum SignatureCheck {
 
 impl SignatureCheck {
     /// When a message carries several signatures, the one to show.
-    fn rank(&self) -> u8 {
+    pub(crate) fn rank(&self) -> u8 {
         match self {
             SignatureCheck::NotSigned => 0,
             SignatureCheck::UnknownSigner { .. } => 1,
@@ -105,6 +106,36 @@ pub fn decrypt(
     message: &[u8],
     senders: &[Cert],
 ) -> Result<Decrypted> {
+    let error = match decrypt_with_sequoia(cert, passphrase, message, senders) {
+        Ok(decrypted) => return Ok(decrypted),
+        Err(e) => e,
+    };
+    let text = format!("{error:#}");
+    // Sequoia 2 cannot read GnuPG's own OCB messages, nor unlock some keys
+    // GnuPG protected with a passphrase. rPGP can: see `fallback`.
+    let gnupg_ocb = text.contains("AEAD Encrypted Data");
+    let cannot_unlock = text.contains(WRONG_PASSPHRASE);
+    if !gnupg_ocb && !cannot_unlock {
+        return Err(explain(error));
+    }
+    if !fallback::passphrase_unlocks(cert, passphrase) {
+        bail!("Wrong passphrase.");
+    }
+    fallback::decrypt(cert, passphrase, message, senders).map_err(|e| {
+        if format!("{e:#}").contains("missing key") {
+            anyhow!("This message was not encrypted for this key.")
+        } else {
+            anyhow!("Could not decrypt: {e:#}")
+        }
+    })
+}
+
+fn decrypt_with_sequoia(
+    cert: &Cert,
+    passphrase: Option<&str>,
+    message: &[u8],
+    senders: &[Cert],
+) -> Result<Decrypted> {
     let policy = policy();
     let helper = Helper {
         cert,
@@ -114,17 +145,11 @@ pub fn decrypt(
         signature: SignatureCheck::NotSigned,
     };
 
-    let mut decryptor = match DecryptorBuilder::from_bytes(message)
-        .and_then(|b| b.with_policy(&policy, None, helper))
-    {
-        Ok(d) => d,
-        Err(e) => return Err(explain(e)),
-    };
+    let mut decryptor =
+        DecryptorBuilder::from_bytes(message).and_then(|b| b.with_policy(&policy, None, helper))?;
 
     let mut plaintext = Vec::new();
-    decryptor
-        .read_to_end(&mut plaintext)
-        .map_err(|e| explain(e.into()))?;
+    decryptor.read_to_end(&mut plaintext)?;
     let signature = decryptor.into_helper().signature;
     Ok(Decrypted {
         plaintext,
@@ -139,14 +164,6 @@ fn explain(e: anyhow::Error) -> anyhow::Error {
         anyhow!("Wrong passphrase.")
     } else if text.contains(NOT_FOR_THIS_KEY) {
         anyhow!("This message was not encrypted for this key.")
-    } else if text.contains("AEAD Encrypted Data") {
-        // GnuPG's own OCB format (LibrePGP), which Sequoia 2 no longer reads.
-        // GnuPG uses it for keys made by GnuPG 2.4+ or Kleopatra.
-        anyhow!(
-            "This message uses GnuPG's own format, which comfyPGP cannot open yet. \
-             It happens when your key was made with GnuPG or Kleopatra. \
-             Open it there, or ask the sender to use a key made with comfyPGP."
-        )
     } else if let Some(openpgp::Error::MalformedMessage(_) | openpgp::Error::MalformedPacket(_)) =
         e.downcast_ref::<openpgp::Error>()
     {
@@ -204,20 +221,10 @@ fn classify(result: std::result::Result<GoodChecksum, VerificationError>) -> Sig
             signer: cert.clone(),
             reason: "The key that signed this is not properly part of the sender's key.",
         },
-        Err(VerificationError::BadKey { ka, error, .. }) => {
-            let error = format!("{error:#}").to_lowercase();
-            let reason = if error.contains("revoked") {
-                "The sender's key has been revoked."
-            } else if error.contains("expired") || error.contains("not alive") {
-                "The sender's key had expired when this was signed."
-            } else {
-                "The sender's key cannot be used for signatures."
-            };
-            SignatureCheck::KeyProblem {
-                signer: ka.cert().clone(),
-                reason,
-            }
-        }
+        Err(VerificationError::BadKey { ka, error, .. }) => SignatureCheck::KeyProblem {
+            signer: ka.cert().clone(),
+            reason: key_problem_reason(&error),
+        },
         Err(VerificationError::BadSignature { ka, .. }) => SignatureCheck::Bad {
             signer: Some(ka.cert().clone()),
         },
@@ -226,7 +233,19 @@ fn classify(result: std::result::Result<GoodChecksum, VerificationError>) -> Sig
 }
 
 /// A fingerprint grouped in blocks of 4, or a key ID as is.
-fn pretty_handle(handle: &KeyHandle) -> String {
+/// Why a signer's key could not be relied on, in plain words.
+pub(crate) fn key_problem_reason(error: &anyhow::Error) -> &'static str {
+    let error = format!("{error:#}").to_lowercase();
+    if error.contains("revoked") {
+        "The sender's key has been revoked."
+    } else if error.contains("expired") || error.contains("not alive") {
+        "The sender's key had expired when this was signed."
+    } else {
+        "The sender's key cannot be used for signatures."
+    }
+}
+
+pub(crate) fn pretty_handle(handle: &KeyHandle) -> String {
     let hex = handle.to_hex();
     hex.as_bytes()
         .chunks(4)
@@ -587,86 +606,6 @@ mod tests {
             "{:?}",
             d.signature
         );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Keys made by GnuPG 2.4+ get messages in GnuPG's own OCB format,
-    /// which Sequoia 2 cannot read: we must say so in plain words.
-    /// Requires `gpg` on the PATH: `cargo test -- --ignored`.
-    #[test]
-    #[ignore]
-    fn gnupg_ocb_messages() {
-        use std::process::{Command, Stdio};
-
-        let dir = std::env::temp_dir().join(format!("comfypgp-ocb-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let gpg = || {
-            let mut c = Command::new("gpg");
-            c.arg("--homedir").arg(&dir).args([
-                "--batch",
-                "--pinentry-mode",
-                "loopback",
-                "--passphrase",
-                "",
-            ]);
-            c
-        };
-        let ok = gpg()
-            .args([
-                "--quick-gen-key",
-                "GnuPG Key",
-                "default",
-                "default",
-                "never",
-            ])
-            .output()
-            .unwrap();
-        assert!(
-            ok.status.success(),
-            "{}",
-            String::from_utf8_lossy(&ok.stderr)
-        );
-        let secret = gpg()
-            .args(["--armor", "--export-secret-keys", "GnuPG Key"])
-            .output()
-            .unwrap()
-            .stdout;
-        let cert = load_secret_key(&secret).unwrap();
-
-        let mut child = gpg()
-            .args([
-                "--trust-model",
-                "always",
-                "--armor",
-                "--force-ocb",
-                "--encrypt",
-            ])
-            .args(["-r", "GnuPG Key"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(b"ocb from gnupg")
-            .unwrap();
-        let out = child.wait_with_output().unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert!(String::from_utf8_lossy(&out.stdout).contains("BEGIN PGP MESSAGE"));
-
-        // Sequoia 2 cannot read this format: we explain instead of failing
-        // with a technical error.
-        let err = decrypt(&cert, None, &out.stdout, &[])
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("GnuPG's own format"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

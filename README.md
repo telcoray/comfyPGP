@@ -41,16 +41,18 @@ cargo test -- --include-ignored
 ## How it works
 
 The OpenPGP logic comes from [Sequoia PGP](https://sequoia-pgp.org/), using its
-Windows CNG backend (the cryptography built into Windows). comfyPGP does not
-implement any cryptography of its own. The interface is built with
+Windows CNG backend (the cryptography built into Windows). Keys and messages
+made by GnuPG 2.4+ or Kleopatra sometimes use formats Sequoia cannot handle
+(GnuPG's own OCB encryption, and some passphrase-protected keys): for those,
+[rPGP](https://github.com/rpgp/rpgp) unlocks the key and removes the encryption,
+while signatures are still checked by Sequoia. comfyPGP does not implement any
+cryptography of its own. The interface is built with
 [egui](https://github.com/emilk/egui).
 
 ## Current limitations
 
 - Signing is not available yet: encrypted messages are not signed.
-- Messages in GnuPG's own OCB format cannot be opened yet. GnuPG uses it for
-  keys created with GnuPG 2.4+ or Kleopatra; messages to keys created with
-  comfyPGP are not affected.
+
 
 ## License
 
@@ -58,4 +60,5 @@ comfyPGP is released under the [MIT License](LICENSE).
 
 It depends on [sequoia-openpgp](https://crates.io/crates/sequoia-openpgp), which
 is licensed under the LGPL-2.0-or-later. If you distribute comfyPGP binaries,
-the LGPL terms apply to that part.
+the LGPL terms apply to that part. It also uses [rPGP](https://crates.io/crates/pgp)
+(MIT or Apache-2.0).

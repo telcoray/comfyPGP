@@ -4,6 +4,7 @@
 mod app;
 mod decrypt;
 mod encrypt;
+mod fallback;
 mod keygen;
 mod policy;
 
