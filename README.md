@@ -26,6 +26,31 @@ plain-language explanation, so you never have to guess what an option means.
 - Works with GnuPG, Kleopatra, Thunderbird and other OpenPGP apps
 - A single `.exe`, no installer and no external DLLs
 
+## Verifying downloads
+
+From version 0.5.0, every release is signed with the **comfyPGP releases** key:
+
+```
+9B31 82EF 6973 F85E AB90  7814 4C5E 75B8 AEFB D74C
+```
+
+Its public key is [comfyPGP-releases.asc](comfyPGP-releases.asc). The signature
+is the `.asc` file next to each `.exe` on the release page.
+
+**With comfyPGP:** add `comfyPGP-releases.asc` in Contacts, then go to
+Sign & Verify → Verify → "Check a file instead…" and choose the `.exe`. Its
+signature next to it is found automatically. You should see
+✔ **Signed by comfyPGP releases**.
+
+**With GnuPG:**
+
+```
+gpg --import comfyPGP-releases.asc
+gpg --verify comfyPGP-0.5.0-windows-x64.exe.asc comfyPGP-0.5.0-windows-x64.exe
+```
+
+Check that the fingerprint above matches the one comfyPGP or GnuPG shows.
+
 ## Build
 
 You need [Rust](https://rustup.rs/) (stable, MSVC toolchain).
