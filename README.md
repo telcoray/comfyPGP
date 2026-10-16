@@ -20,6 +20,8 @@ plain-language explanation, so you never have to guess what an option means.
 - **Sign** what you encrypt with one of your keys, so the recipient knows it is from you
 - **Check signatures** on received messages: see who signed the message and whether
   it was changed
+- **Sign & Verify** without encrypting: readable signed texts, and separate signature
+  files for documents or programs, compatible with GnuPG
 - **Address book**: your own keys and your contacts, each with a name you choose
 - Works with GnuPG, Kleopatra, Thunderbird and other OpenPGP apps
 - A single `.exe`, no installer and no external DLLs

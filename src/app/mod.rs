@@ -17,6 +17,7 @@ mod book;
 mod decrypt_tab;
 mod encrypt_tab;
 mod generate;
+mod sign_tab;
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
 
@@ -63,6 +64,7 @@ enum Status {
 enum Tab {
     Encrypt,
     Decrypt,
+    Sign,
     Contacts,
     MyKeys,
     Generate,
@@ -72,6 +74,7 @@ pub struct ComfyApp {
     tab: Tab,
     store: Store,
     book: book::BookState,
+    sign: sign_tab::SignState,
 
     name: String,
     email: String,
@@ -136,6 +139,7 @@ impl ComfyApp {
             tab,
             store,
             book: Default::default(),
+            sign: Default::default(),
             name: String::new(),
             email: String::new(),
             algorithm: Algorithm::Cv25519,
@@ -193,6 +197,21 @@ impl ComfyApp {
         }
     }
 
+    /// Public keys of everyone in the address book, to check signatures.
+    fn address_book_certs(&self) -> Vec<Cert> {
+        self.store
+            .contacts
+            .iter()
+            .map(|e| e.cert.clone())
+            .chain(
+                self.store
+                    .my_keys
+                    .iter()
+                    .map(|e| e.cert.clone().strip_secret_key_material()),
+            )
+            .collect()
+    }
+
     /// The name the user gave this key, or its User ID.
     fn display_name(&self, cert: &Cert) -> String {
         self.store
@@ -222,10 +241,11 @@ impl eframe::App for ComfyApp {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("comfyPGP");
                 ui.add_space(6.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     let tabs = [
                         (Tab::Encrypt, "🔒 Encrypt"),
                         (Tab::Decrypt, "🔓 Decrypt"),
+                        (Tab::Sign, "🔏 Sign & Verify"),
                         (Tab::Contacts, "👤 Contacts"),
                         (Tab::MyKeys, "🗝 My keys"),
                         (Tab::Generate, "✨ New key"),
@@ -243,6 +263,7 @@ impl eframe::App for ComfyApp {
                     }
                     Tab::Encrypt => self.encrypt_ui(ui),
                     Tab::Decrypt => self.decrypt_ui(ui),
+                    Tab::Sign => self.sign_tab_ui(ui),
                     Tab::Contacts => self.contacts_ui(ui),
                     Tab::MyKeys => self.my_keys_ui(ui),
                 }

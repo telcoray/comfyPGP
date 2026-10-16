@@ -7,6 +7,7 @@ mod encrypt;
 mod fallback;
 mod keygen;
 mod policy;
+mod sign;
 mod store;
 
 fn main() -> eframe::Result {

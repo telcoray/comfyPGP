@@ -383,7 +383,7 @@ impl ComfyApp {
         }
     }
 
-    fn save_text(&mut self, file_name: &str, title: &str, bytes: &[u8]) {
+    pub(super) fn save_text(&mut self, file_name: &str, title: &str, bytes: &[u8]) {
         let Some(path) = rfd::FileDialog::new()
             .set_title(title)
             .set_file_name(file_name)

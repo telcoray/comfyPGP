@@ -242,7 +242,9 @@ impl VerificationHelper for Helper<'_> {
     }
 }
 
-fn classify(result: std::result::Result<GoodChecksum, VerificationError>) -> SignatureCheck {
+pub(crate) fn classify(
+    result: std::result::Result<GoodChecksum, VerificationError>,
+) -> SignatureCheck {
     match result {
         Ok(GoodChecksum { ka, .. }) => SignatureCheck::Good {
             signer: ka.cert().clone(),
