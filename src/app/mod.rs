@@ -91,6 +91,11 @@ pub struct ComfyApp {
     /// One of the user's keys, also encrypted to so they can read the
     /// message later.
     enc_from: Option<Fingerprint>,
+    /// Sign with the From key.
+    enc_sign: bool,
+    enc_sign_passphrase: String,
+    /// Problems with the From key, shown under it.
+    enc_from_notice: Status,
     enc_recipients: Vec<Cert>,
     enc_message: String,
     /// A file to encrypt instead of the text: (file name, contents).
@@ -144,6 +149,9 @@ impl ComfyApp {
             gen_save_name: String::new(),
             gen_saved_as: None,
             enc_from,
+            enc_sign: true,
+            enc_sign_passphrase: String::new(),
+            enc_from_notice: Status::None,
             enc_recipients: Vec::new(),
             enc_message: String::new(),
             enc_file: None,
@@ -255,13 +263,13 @@ fn user_id_of(cert: &Cert) -> String {
         .unwrap_or_else(|| "(no User ID)".into())
 }
 
-/// One key in a list: its name, then User ID and fingerprint, with a ✕
-/// to remove it. Returns `true` when ✕ is clicked.
+/// One key in a list: its name, then User ID and fingerprint, with a ✖
+/// to remove it. Returns `true` when ✖ is clicked.
 fn cert_row(ui: &mut egui::Ui, name: &str, cert: &Cert) -> bool {
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new(format!("✔ {name}")).strong());
         ui.label(RichText::new(key_details(cert)).weak());
-        ui.small_button("✕").on_hover_text("Remove").clicked()
+        ui.small_button("✖").on_hover_text("Remove").clicked()
     })
     .inner
 }

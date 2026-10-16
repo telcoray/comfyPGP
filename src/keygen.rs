@@ -80,6 +80,60 @@ pub fn generate(req: &KeyRequest) -> Result<GeneratedKey> {
     Ok(GeneratedKey { cert, revocation })
 }
 
+/// Locks all of the key's secret parts with `new` passphrase. `current`
+/// is needed if the key already has one.
+pub fn set_passphrase(cert: &Cert, current: Option<&str>, new: &str) -> Result<Cert> {
+    if new.is_empty() {
+        bail!("Enter the new passphrase.");
+    }
+    if !cert.is_tsk() {
+        bail!("This is only a public key: it has no secret part to protect.");
+    }
+    let unlocked = unlock_all(cert, current)?;
+    let new = Password::from(new);
+    let mut packets: Vec<Packet> = Vec::new();
+    for ka in unlocked.keys().secret() {
+        let key = ka.key().clone().encrypt_secret(&new)?;
+        packets.push(if ka.primary() {
+            key.role_into_primary().into()
+        } else {
+            key.role_into_subordinate().into()
+        });
+    }
+    let (locked, _) = unlocked.insert_packets(packets)?;
+    Ok(locked)
+}
+
+/// A copy of `cert` with every secret part unlocked, in memory only.
+fn unlock_all(cert: &Cert, passphrase: Option<&str>) -> Result<Cert> {
+    let locked = cert
+        .keys()
+        .secret()
+        .any(|ka| ka.key().secret().is_encrypted());
+    if !locked {
+        return Ok(cert.clone());
+    }
+    let Some(passphrase) = passphrase.filter(|p| !p.is_empty()) else {
+        bail!("Enter the current passphrase.");
+    };
+    let password = Password::from(passphrase);
+    let mut packets: Vec<Packet> = Vec::new();
+    for ka in cert.keys().secret() {
+        let key = ka.key().clone();
+        if !key.secret().is_encrypted() {
+            continue;
+        }
+        match key.decrypt_secret(&password) {
+            Ok(key) if ka.primary() => packets.push(key.role_into_primary().into()),
+            Ok(key) => packets.push(key.role_into_subordinate().into()),
+            // Sequoia fails to unlock many keys GnuPG protected: rPGP can,
+            // and it also tells a wrong passphrase.
+            Err(_) => return crate::fallback::unlocked_copy(cert, passphrase),
+        }
+    }
+    Ok(cert.clone().insert_packets(packets)?.0)
+}
+
 /// What to export.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Part {
@@ -191,6 +245,93 @@ mod tests {
         let features = key.cert.with_policy(&p, None).unwrap().features().unwrap();
         assert!(features.supports_seipdv1());
         assert!(!features.supports_seipdv2());
+    }
+
+    fn is_locked_with(cert: &Cert, passphrase: &str) -> bool {
+        cert.keys().secret().all(|ka| {
+            let key = ka.key().clone();
+            key.secret().is_encrypted() && key.decrypt_secret(&Password::from(passphrase)).is_ok()
+        })
+    }
+
+    #[test]
+    fn set_and_change_passphrase() {
+        let key = generate(&request(None, None)).unwrap();
+        let locked = set_passphrase(&key.cert, None, "first").unwrap();
+        assert_eq!(locked.fingerprint(), key.cert.fingerprint());
+        assert_eq!(
+            locked.keys().secret().count(),
+            key.cert.keys().secret().count()
+        );
+        assert!(is_locked_with(&locked, "first"));
+
+        let err = set_passphrase(&locked, Some("wrong"), "second").unwrap_err();
+        assert_eq!(err.to_string(), "Wrong passphrase.");
+        assert!(set_passphrase(&locked, None, "second").is_err());
+
+        let changed = set_passphrase(&locked, Some("first"), "second").unwrap();
+        assert!(is_locked_with(&changed, "second"));
+        assert!(!is_locked_with(&changed, "first"));
+    }
+
+    /// The fix for keys without a passphrase that GnuPG 2.5 mis-imports:
+    /// set one, export again, and GnuPG can decrypt with it.
+    /// Requires `gpg` on the PATH: `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn gnupg_uses_key_after_setting_passphrase() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let key = generate(&request(None, None)).unwrap();
+        let locked = GeneratedKey {
+            cert: set_passphrase(&key.cert, None, "now-safe").unwrap(),
+            revocation: key.revocation,
+        };
+        let dir = std::env::temp_dir().join(format!("comfypgp-setpass-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("secret.asc");
+        std::fs::write(
+            &file,
+            export(&locked, Part::Secret, Encoding::Armored).unwrap(),
+        )
+        .unwrap();
+        let gpg = || {
+            let mut c = Command::new("gpg");
+            c.arg("--homedir").arg(&dir).args([
+                "--batch",
+                "--pinentry-mode",
+                "loopback",
+                "--passphrase",
+                "now-safe",
+            ]);
+            c
+        };
+        assert!(gpg().arg("--import").arg(&file).status().unwrap().success());
+
+        let msg = crate::encrypt::encrypt(std::slice::from_ref(&locked.cert), b"works", true, None)
+            .unwrap();
+        let mut child = gpg()
+            .arg("--decrypt")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(&msg).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(out.stdout, b"works");
+        let _ = Command::new("gpgconf")
+            .arg("--homedir")
+            .arg(&dir)
+            .args(["--kill", "gpg-agent"])
+            .output();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

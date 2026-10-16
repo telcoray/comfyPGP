@@ -46,6 +46,23 @@ pub fn passphrase_unlocks(cert: &Cert, passphrase: Option<&str>) -> bool {
         || opens(key.primary_key.unlock(&password, |_, _| Ok(())))
 }
 
+/// A copy of `cert` with its secret keys unlocked by rPGP, for Sequoia to
+/// use. It lives only in memory and is never saved. Fails if the
+/// passphrase is wrong.
+pub fn unlocked_copy(cert: &Cert, passphrase: &str) -> Result<Cert> {
+    let mut key = to_rpgp(cert)?;
+    let password = Password::from(passphrase);
+    key.primary_key
+        .remove_password(&password)
+        .map_err(|_| anyhow!("Wrong passphrase."))?;
+    for sub in &mut key.secret_subkeys {
+        sub.key
+            .remove_password(&password)
+            .map_err(|_| anyhow!("Wrong passphrase."))?;
+    }
+    Cert::from_bytes(&key.to_bytes()?)
+}
+
 /// Decrypts a message with rPGP. The caller has already checked that the
 /// passphrase unlocks `cert`.
 pub fn decrypt(
@@ -305,11 +322,68 @@ mod tests {
         let gpg = Gpg::new("classic");
         let me = gpg.new_key("secret");
         let public = me.clone().strip_secret_key_material();
-        let msg = crate::encrypt::encrypt(&[public], b"classic", true).unwrap();
+        let msg = crate::encrypt::encrypt(&[public], b"classic", true, None).unwrap();
         let err = decrypt::decrypt(&me, Some("nope"), &msg, &[]).unwrap_err();
         assert_eq!(err.to_string(), "Wrong passphrase.");
         let d = decrypt::decrypt(&me, Some("secret"), &msg, &[]).unwrap();
         assert_eq!(d.plaintext, b"classic");
+    }
+
+    /// Kleopatra-style keys (made by GnuPG, with a passphrase) can sign.
+    /// Sequoia fails to unlock about half of them, depending on the key's
+    /// random value, so try several.
+    #[test]
+    #[ignore]
+    fn gnupg_keys_sign() {
+        let friend = comfy_key();
+        for round in 0..6 {
+            let gpg = Gpg::new(&format!("signs{round}"));
+            let me = gpg.new_key("secret");
+            assert!(crate::encrypt::signing_needs_passphrase(&me));
+            let err = crate::encrypt::signer(&me, Some("nope"))
+                .map(|_| ())
+                .unwrap_err();
+            assert_eq!(err.to_string(), "Wrong passphrase.");
+
+            let signer = crate::encrypt::signer(&me, Some("secret")).unwrap();
+            let msg = crate::encrypt::encrypt(
+                std::slice::from_ref(&friend),
+                b"from kleopatra",
+                true,
+                Some(signer),
+            )
+            .unwrap();
+            let public_me = me.clone().strip_secret_key_material();
+            let d = decrypt::decrypt(&friend, None, &msg, &[public_me]).unwrap();
+            assert!(
+                matches!(d.signature, SignatureCheck::Good { .. }),
+                "{:?}",
+                d.signature
+            );
+        }
+    }
+    /// Changing the passphrase of a Kleopatra-style key in comfyPGP goes
+    /// through rPGP, and leaves a key Sequoia can unlock by itself.
+    #[test]
+    #[ignore]
+    fn change_passphrase_of_gnupg_key() {
+        use sequoia_openpgp::crypto::Password;
+
+        let gpg = Gpg::new("chpass");
+        let me = gpg.new_key("old");
+        let err = crate::keygen::set_passphrase(&me, Some("nope"), "new").unwrap_err();
+        assert_eq!(err.to_string(), "Wrong passphrase.");
+
+        let changed = crate::keygen::set_passphrase(&me, Some("old"), "new").unwrap();
+        assert_eq!(changed.fingerprint(), me.fingerprint());
+        for ka in changed.keys().secret() {
+            let key = ka.key().clone();
+            assert!(key.secret().is_encrypted());
+            key.decrypt_secret(&Password::from("new")).unwrap();
+        }
+        let msg = gpg.encrypt(&[], b"after change");
+        let d = decrypt::decrypt(&changed, Some("new"), &msg, &[]).unwrap();
+        assert_eq!(d.plaintext, b"after change");
     }
 
     #[test]

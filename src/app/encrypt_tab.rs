@@ -13,7 +13,7 @@ impl ComfyApp {
             let mut clear = false;
             ui.horizontal(|ui| {
                 ui.label(format!("📄 {name}"));
-                clear = ui.small_button("✕").on_hover_text("Remove file").clicked();
+                clear = ui.small_button("✖").on_hover_text("Remove file").clicked();
             });
             if clear {
                 self.enc_file = None;
@@ -35,7 +35,11 @@ impl ComfyApp {
 
         ui.add_space(SECTION_GAP);
         let has_message = self.enc_file.is_some() || !self.enc_message.trim().is_empty();
-        let ready = !self.enc_recipients.is_empty() && has_message;
+        let passphrase_missing = self
+            .signing_cert()
+            .is_some_and(|c| encrypt::signing_needs_passphrase(&c))
+            && self.enc_sign_passphrase.is_empty();
+        let ready = !self.enc_recipients.is_empty() && has_message && !passphrase_missing;
         let button = egui::Button::new(RichText::new("🔒  Encrypt").size(16.0));
         if ui.add_enabled(ready, button).clicked() {
             self.run_encrypt();
@@ -72,11 +76,44 @@ impl ComfyApp {
                 }
                 ui.selectable_value(&mut self.enc_from, None, "Nobody (not even me)");
             });
-        let hint = match &self.enc_from {
-            Some(_) => "You will be able to read this message again later with this key.",
-            None => "Once encrypted, you will not be able to read this message yourself.",
-        };
-        ui.label(RichText::new(hint).weak());
+        let from = self
+            .chosen_own_key()
+            .map(|e| (e.name.clone(), e.cert.clone()));
+        match &from {
+            Some((name, cert)) => {
+                ui.label(
+                    RichText::new(
+                        "You will be able to read this message again later with this key.",
+                    )
+                    .weak(),
+                );
+                match encrypt::check_can_sign(cert) {
+                    Ok(()) => {
+                        ui.checkbox(&mut self.enc_sign, format!("Sign as \"{name}\""));
+                        if self.enc_sign && encrypt::signing_needs_passphrase(cert) {
+                            form_grid("sign-passphrase").show(ui, |ui| {
+                                ui.label("Passphrase");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.enc_sign_passphrase)
+                                        .password(true),
+                                );
+                                ui.end_row();
+                            });
+                        }
+                    }
+                    Err(e) => warning(ui, &format!("{e:#}")),
+                }
+            }
+            None => {
+                ui.label(
+                    RichText::new(
+                        "Once encrypted, you will not be able to read this message yourself.",
+                    )
+                    .weak(),
+                );
+            }
+        }
+        notice_ui(ui, &self.enc_from_notice);
         explainer(
             ui,
             "Why choose one of my keys?",
@@ -84,10 +121,27 @@ impl ComfyApp {
                 "Each of your keys is like a separate identity: for example one for work \
                  and one for friends.",
                 "The message is also locked for the key you choose here, so you can open it \
-                 again later. Soon comfyPGP will also sign it with this key, so the \
-                 recipient knows it comes from you.",
+                 again later.",
+                "With \"Sign\", the message also carries your signature: the recipient can \
+                 check that it really comes from you and that nobody changed it. They need \
+                 your public key for that, so send it to them once.",
             ],
         );
+    }
+
+    /// The From key, if one is chosen.
+    fn chosen_own_key(&self) -> Option<&store::Entry> {
+        let fpr = self.enc_from.as_ref()?;
+        self.store
+            .my_keys
+            .iter()
+            .find(|e| &e.cert.fingerprint() == fpr)
+    }
+
+    /// Whether the message will be signed, and with which key.
+    fn signing_cert(&self) -> Option<Cert> {
+        let entry = self.chosen_own_key()?;
+        (self.enc_sign && encrypt::check_can_sign(&entry.cert).is_ok()).then(|| entry.cert.clone())
     }
 
     /// Who the message is for: contacts, or keys used just this once.
@@ -269,10 +323,26 @@ impl ComfyApp {
 
     fn run_encrypt(&mut self) {
         let recipients = self.all_recipients();
+        self.enc_from_notice = Status::None;
+        let signer = match self.signing_cert() {
+            Some(cert) => match encrypt::signer(&cert, Some(&self.enc_sign_passphrase)) {
+                Ok(signer) => Some(signer),
+                Err(e) => {
+                    self.enc_from_notice = Status::Error(format!("{e:#}"));
+                    return;
+                }
+            },
+            None => None,
+        };
+        let signed_as = signer
+            .as_ref()
+            .and_then(|_| self.chosen_own_key())
+            .map(|e| format!(" and signed as \"{}\"", e.name))
+            .unwrap_or_default();
         match &self.enc_file {
             // Files are saved as binary .gpg right away, like GnuPG does.
             Some((name, bytes)) => {
-                let encrypted = match encrypt::encrypt(&recipients, bytes, false) {
+                let encrypted = match encrypt::encrypt(&recipients, bytes, false, signer) {
                     Ok(e) => e,
                     Err(e) => {
                         self.status = Status::Error(format!("{e:#}"));
@@ -288,17 +358,20 @@ impl ComfyApp {
                     return;
                 };
                 self.status = match std::fs::write(&path, encrypted) {
-                    Ok(()) => Status::Info(format!("Encrypted file saved to {}", path.display())),
+                    Ok(()) => Status::Info(format!(
+                        "File encrypted{signed_as}, saved to {}",
+                        path.display()
+                    )),
                     Err(e) => Status::Error(format!("Could not save: {e}")),
                 };
             }
             None => {
-                match encrypt::encrypt(&recipients, self.enc_message.as_bytes(), true)
+                match encrypt::encrypt(&recipients, self.enc_message.as_bytes(), true, signer)
                     .and_then(|bytes| Ok(String::from_utf8(bytes)?))
                 {
                     Ok(text) => {
                         self.enc_output = Some(text);
-                        self.status = Status::Info("Message encrypted.".into());
+                        self.status = Status::Info(format!("Message encrypted{signed_as}."));
                     }
                     Err(e) => self.status = Status::Error(format!("{e:#}")),
                 }

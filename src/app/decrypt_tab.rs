@@ -9,7 +9,7 @@ impl ComfyApp {
             let mut clear = false;
             ui.horizontal(|ui| {
                 ui.label(format!("📄 {name}"));
-                clear = ui.small_button("✕").on_hover_text("Remove file").clicked();
+                clear = ui.small_button("✖").on_hover_text("Remove file").clicked();
             });
             if clear {
                 self.dec_file = None;

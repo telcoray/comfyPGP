@@ -23,6 +23,16 @@ pub(super) struct BookState {
     renaming: Option<(List, Fingerprint, String)>,
     /// The entry waiting for a second click to be removed.
     confirm_remove: Option<(List, Fingerprint)>,
+    /// The key whose passphrase is being set or changed.
+    passphrase_form: Option<PassphraseForm>,
+}
+
+struct PassphraseForm {
+    fpr: Fingerprint,
+    current: String,
+    new: String,
+    repeat: String,
+    error: Option<String>,
 }
 
 enum Action {
@@ -32,6 +42,9 @@ enum Action {
     CopyPublic,
     SavePublic,
     SaveSecret,
+    StartPassphrase,
+    SavePassphrase,
+    CancelPassphrase,
     AskRemove,
     Remove,
     CancelRemove,
@@ -217,6 +230,13 @@ impl ComfyApp {
                 }
                 ui.label(RichText::new(key_details(&entry.cert)).weak());
                 key_warnings(ui, &entry.cert, list);
+                let locked = has_passphrase(&entry.cert);
+                if let Some(form) = &mut self.book.passphrase_form
+                    && form.fpr == fpr
+                    && let Some(a) = passphrase_form_ui(ui, form, locked)
+                {
+                    action = Some((fpr.clone(), a));
+                }
 
                 ui.horizontal_wrapped(|ui| {
                     if ui.small_button("✏ Rename").clicked() {
@@ -228,7 +248,15 @@ impl ComfyApp {
                     if ui.small_button("💾 Save public key…").clicked() {
                         action = Some((fpr.clone(), Action::SavePublic));
                     }
-                    if list == List::MyKeys && ui.small_button("🔒 Save secret key…").clicked()
+                    let label = if locked {
+                        "🔒 Change passphrase…"
+                    } else {
+                        "🔒 Set passphrase…"
+                    };
+                    if list == List::MyKeys && ui.small_button(label).clicked() {
+                        action = Some((fpr.clone(), Action::StartPassphrase));
+                    }
+                    if list == List::MyKeys && ui.small_button("💾 Save secret key…").clicked()
                     {
                         action = Some((fpr.clone(), Action::SaveSecret));
                     }
@@ -291,6 +319,49 @@ impl ComfyApp {
                     "Save public key",
                     text.as_bytes(),
                 );
+            }
+            Action::StartPassphrase => {
+                self.book.passphrase_form = Some(PassphraseForm {
+                    fpr,
+                    current: String::new(),
+                    new: String::new(),
+                    repeat: String::new(),
+                    error: None,
+                });
+            }
+            Action::CancelPassphrase => self.book.passphrase_form = None,
+            Action::SavePassphrase => {
+                let Some(form) = &mut self.book.passphrase_form else {
+                    return;
+                };
+                if form.new.is_empty() {
+                    form.error = Some("Enter the new passphrase.".into());
+                    return;
+                }
+                if form.new != form.repeat {
+                    form.error = Some("The new passphrases do not match.".into());
+                    return;
+                }
+                match keygen::set_passphrase(&cert, Some(&form.current), &form.new) {
+                    Ok(locked) => {
+                        entries[index].cert = locked.clone();
+                        self.book.passphrase_form = None;
+                        if self
+                            .dec_key
+                            .as_ref()
+                            .is_some_and(|c| c.fingerprint() == locked.fingerprint())
+                        {
+                            self.dec_key = Some(locked);
+                            self.dec_passphrase.clear();
+                        }
+                        self.book.my_keys_notice = Status::Info(format!(
+                            "Passphrase saved for \"{name}\". If you use this key in other \
+                             apps, save the secret key again and import it there."
+                        ));
+                        self.persist();
+                    }
+                    Err(e) => form.error = Some(format!("{e:#}")),
+                }
             }
             Action::SaveSecret => match cert.as_tsk().armored().to_vec() {
                 Ok(bytes) => {
@@ -364,6 +435,49 @@ impl ComfyApp {
         self.book.contact_notice = Status::Info("Give the contact a name and save it.".into());
         self.tab = Tab::Contacts;
     }
+}
+
+/// Whether any secret part of the key is locked with a passphrase.
+fn has_passphrase(cert: &Cert) -> bool {
+    cert.keys()
+        .secret()
+        .any(|ka| ka.key().secret().is_encrypted())
+}
+
+/// The form to set or change a key's passphrase, inside its row.
+fn passphrase_form_ui(
+    ui: &mut egui::Ui,
+    form: &mut PassphraseForm,
+    locked: bool,
+) -> Option<Action> {
+    let mut action = None;
+    ui.add_space(4.0);
+    form_grid(&format!("passphrase-{}", form.fpr)).show(ui, |ui| {
+        if locked {
+            ui.label("Current passphrase");
+            ui.add(egui::TextEdit::singleline(&mut form.current).password(true));
+            ui.end_row();
+        }
+        ui.label("New passphrase");
+        ui.add(egui::TextEdit::singleline(&mut form.new).password(true));
+        ui.end_row();
+        ui.label("Repeat");
+        ui.add(egui::TextEdit::singleline(&mut form.repeat).password(true));
+        ui.end_row();
+    });
+    ui.horizontal(|ui| {
+        if ui.button("Save passphrase").clicked() {
+            action = Some(Action::SavePassphrase);
+        }
+        if ui.button("Cancel").clicked() {
+            action = Some(Action::CancelPassphrase);
+        }
+    });
+    if let Some(error) = &form.error {
+        ui.colored_label(ERROR_COLOR, error);
+    }
+    ui.add_space(4.0);
+    action
 }
 
 /// Things worth knowing about a saved key, as warnings under it.
