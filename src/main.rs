@@ -7,6 +7,7 @@ mod encrypt;
 mod fallback;
 mod keygen;
 mod policy;
+mod store;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -19,6 +20,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "comfyPGP",
         options,
-        Box::new(|_cc| Ok(Box::new(app::ComfyApp::default()))),
+        Box::new(|_cc| Ok(Box::new(app::ComfyApp::new()))),
     )
 }

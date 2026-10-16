@@ -60,6 +60,39 @@ pub struct Decrypted {
     pub signature: SignatureCheck,
 }
 
+/// The keys a message says it was encrypted for. Empty if the message
+/// cannot be read or hides its recipients.
+pub fn recipients(message: &[u8]) -> Vec<KeyHandle> {
+    use openpgp::Packet;
+    use openpgp::parse::{PacketParser, PacketParserResult};
+
+    let mut found = Vec::new();
+    let Ok(mut ppr) = PacketParser::from_bytes(message) else {
+        return found;
+    };
+    while let PacketParserResult::Some(pp) = ppr {
+        match &pp.packet {
+            Packet::PKESK(pkesk) => found.extend(pkesk.recipient()),
+            Packet::SKESK(_) => {}
+            // The recipients all come first.
+            _ => break,
+        }
+        match pp.next() {
+            Ok((_, next)) => ppr = next,
+            Err(_) => break,
+        }
+    }
+    found
+}
+
+/// Whether one of `cert`'s keys is among `recipients`.
+pub fn is_for(cert: &Cert, recipients: &[KeyHandle]) -> bool {
+    cert.keys().any(|k| {
+        let handle = k.key().key_handle();
+        recipients.iter().any(|r| r.aliases(&handle))
+    })
+}
+
 /// Reads a sender's key to check signatures with. Only the public part
 /// is kept, and the key does not need to be usable for encryption.
 pub fn load_sender_key(bytes: &[u8]) -> Result<Cert> {
@@ -338,6 +371,16 @@ mod tests {
 
     fn public(cert: &Cert) -> Cert {
         cert.clone().strip_secret_key_material()
+    }
+
+    #[test]
+    fn finds_which_key_a_message_is_for() {
+        let (me, other) = (new_key(None), new_key(None));
+        let msg = encrypt_to(&me, b"hi");
+        let found = recipients(&msg);
+        assert!(is_for(&me, &found));
+        assert!(!is_for(&other, &found));
+        assert!(recipients(b"not a message").is_empty());
     }
 
     #[test]

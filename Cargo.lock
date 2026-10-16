@@ -922,6 +922,8 @@ dependencies = [
  "pgp",
  "rfd",
  "sequoia-openpgp",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
