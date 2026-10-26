@@ -1,0 +1,10 @@
+[package]
+name = "make-icon"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Renders assets/icon.svg into the Windows .ico and the window icon PNG"
+
+[dependencies]
+ico = "0.6"
+resvg = "0.48"

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- comfyPGP: a soft padlock with a heart-shaped keyhole. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFC48A"/>
+      <stop offset="1" stop-color="#EF6F5B"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="58" fill="url(#bg)"/>
+  <!-- Shackle -->
+  <path d="M 90 122 V 94 A 38 38 0 0 1 166 94 V 122"
+        fill="none" stroke="#FFF7EC" stroke-width="26" stroke-linecap="round"/>
+  <!-- Body -->
+  <rect x="58" y="112" width="140" height="106" rx="32" fill="#FFF7EC"/>
+  <!-- Heart-shaped keyhole -->
+  <path d="M 128 192
+           C 104 176, 94 158, 104 146
+           C 112 137, 124 140, 128 149
+           C 132 140, 144 137, 152 146
+           C 162 158, 152 176, 128 192 Z"
+        fill="#EA6450"/>
+</svg>

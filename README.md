@@ -1,8 +1,11 @@
+<p align="center"><img src="assets/icon-256.png" alt="comfyPGP logo" width="128"></p>
+
 # comfyPGP
 
 A friendly OpenPGP app for Windows, made for people who have never used PGP.
 
-comfyPGP creates PGP keys and decrypts messages. Every choice comes with a short,
+comfyPGP creates keys, encrypts, decrypts, signs and checks signatures, and keeps
+your keys and contacts in an address book. Every choice comes with a short,
 plain-language explanation, so you never have to guess what an option means.
 
 ## Features
