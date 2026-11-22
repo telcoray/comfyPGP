@@ -56,6 +56,9 @@ gpg --verify comfyPGP-0.5.1-windows-x64.exe.asc comfyPGP-0.5.1-windows-x64.exe
 
 Check that the fingerprint above matches the one comfyPGP or GnuPG shows.
 
+From November 2026, commits and release tags are signed with the same key too:
+GitHub shows them as **Verified**.
+
 **Version 0.5.0** was signed with an earlier key, **comfyPGP releases**
 (`9B31 82EF 6973 F85E AB90  7814 4C5E 75B8 AEFB D74C`,
 [comfyPGP-releases-2026-10.asc](comfyPGP-releases-2026-10.asc)). That key was
