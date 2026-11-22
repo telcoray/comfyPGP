@@ -1,3 +1,9 @@
 /target
 /demo
 /tools/make-icon/target
+
+# Never commit secret keys or revocation certificates
+*secret*
+*revocation*
+*.rev
+Fj.jF.d69BRAhB.txt

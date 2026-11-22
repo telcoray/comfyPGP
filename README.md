@@ -31,28 +31,36 @@ plain-language explanation, so you never have to guess what an option means.
 
 ## Verifying downloads
 
-From version 0.5.0, every release is signed with the **comfyPGP releases** key:
+From version 0.5.1, releases are signed with the **Telcoray Github** key, which
+signs the releases of all Telcoray projects:
 
 ```
-9B31 82EF 6973 F85E AB90  7814 4C5E 75B8 AEFB D74C
+B7E1 8129 21B3 2E65 3349  581F C972 2CF9 41EA 4C91
 ```
 
-Its public key is [comfyPGP-releases.asc](comfyPGP-releases.asc). The signature
-is the `.asc` file next to each `.exe` on the release page.
+Its public key is [telcoray-github.asc](telcoray-github.asc). The signature is
+the `.asc` file next to each `.exe` on the release page.
 
-**With comfyPGP:** add `comfyPGP-releases.asc` in Contacts, then go to
+**With comfyPGP:** add `telcoray-github.asc` in Contacts, then go to
 Sign & Verify → Verify → "Check a file instead…" and choose the `.exe`. Its
 signature next to it is found automatically. You should see
-✔ **Signed by comfyPGP releases**.
+✔ **Signed by Telcoray Github**.
 
 **With GnuPG:**
 
 ```
-gpg --import comfyPGP-releases.asc
-gpg --verify comfyPGP-0.5.0-windows-x64.exe.asc comfyPGP-0.5.0-windows-x64.exe
+gpg --import telcoray-github.asc
+gpg --verify comfyPGP-0.5.1-windows-x64.exe.asc comfyPGP-0.5.1-windows-x64.exe
 ```
 
 Check that the fingerprint above matches the one comfyPGP or GnuPG shows.
+
+**Version 0.5.0** was signed with an earlier key, **comfyPGP releases**
+(`9B31 82EF 6973 F85E AB90  7814 4C5E 75B8 AEFB D74C`,
+[comfyPGP-releases-2026-10.asc](comfyPGP-releases-2026-10.asc)). That key was
+retired in November 2026 because its passphrase was lost: it was not
+compromised, and its signature on 0.5.0 is still valid. It will not sign
+anything else, and it expires on 15 October 2028.
 
 ## Build
 
