@@ -1,0 +1,4 @@
+# Put the Visual C++ runtime inside comfypgp.exe, so it runs on any Windows
+# without the "VC++ Redistributable" installed.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

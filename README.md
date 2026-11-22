@@ -27,7 +27,8 @@ plain-language explanation, so you never have to guess what an option means.
   files for documents or programs, compatible with GnuPG
 - **Address book**: your own keys and your contacts, each with a name you choose
 - Works with GnuPG, Kleopatra, Thunderbird and other OpenPGP apps
-- A single `.exe`, no installer and no external DLLs
+- A single `.exe`: nothing to install, not even the Visual C++ runtime (from 0.5.2;
+  earlier versions need it, and most PCs already have it)
 
 ## Verifying downloads
 
